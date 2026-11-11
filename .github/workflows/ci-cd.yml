@@ -1,0 +1,180 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  ENV: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+  REPOSITORIO_ECR: oficina-billing
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Testes com cobertura mínima de 80%
+        run: python -m pytest -v --cov --cov-report=term-missing --cov-fail-under=80
+
+      - name: Resumo da cobertura
+        if: always()
+        run: python -m coverage report --format=markdown >> $GITHUB_STEP_SUMMARY
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: python -m pip install ruff bandit
+
+      - name: Ruff (erros, más práticas e complexidade)
+        run: ruff check .
+
+      - name: Bandit (segurança)
+        run: bandit -r src -ll -ii
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform fmt e validate
+        run: |
+          terraform -chdir=terraform fmt -check
+          terraform -chdir=terraform init -backend=false
+          terraform -chdir=terraform validate
+
+  build:
+    needs: [test, quality]
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verifica credenciais AWS
+        run: |
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            echo "Credenciais AWS não configuradas, build ignorado."
+            echo "SKIP_AWS=true" >> $GITHUB_ENV
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: env.SKIP_AWS != 'true'
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        if: env.SKIP_AWS != 'true'
+        id: ecr
+
+      - name: Build e push da imagem
+        if: env.SKIP_AWS != 'true'
+        env:
+          IMAGEM: ${{ steps.ecr.outputs.registry }}/oficina-billing
+        run: |
+          docker build -t $IMAGEM:${{ github.sha }} -t $IMAGEM:${{ env.ENV }} .
+          docker push --all-tags $IMAGEM
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    concurrency:
+      group: deploy-${{ github.ref }}
+      cancel-in-progress: false
+    environment:
+      name: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+      url: ${{ steps.publica.outputs.url }}
+    env:
+      TF_VAR_env: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+      TF_VAR_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verifica credenciais AWS
+        run: |
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            echo "Credenciais AWS não configuradas, deploy ignorado."
+            echo "SKIP_AWS=true" >> $GITHUB_ENV
+          elif [ -z "${{ vars.TF_STATE_BUCKET }}" ]; then
+            echo "::error::Configure a variável TF_STATE_BUCKET com o bucket S3 do estado do Terraform."
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: env.SKIP_AWS != 'true'
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        if: env.SKIP_AWS != 'true'
+
+      - name: Terraform do serviço (DynamoDB, fila e permissões)
+        if: env.SKIP_AWS != 'true'
+        run: |
+          terraform -chdir=terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=billing-service/${ENV}.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="use_lockfile=true"
+          terraform -chdir=terraform apply -auto-approve -lock-timeout=15m
+
+      - name: Configura kubectl
+        if: env.SKIP_AWS != 'true'
+        run: |
+          CLUSTER=$(aws ssm get-parameter --name /oficina/eks/cluster_name --query Parameter.Value --output text)
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER"
+
+      - name: Aplica os manifestos no namespace do ambiente
+        if: env.SKIP_AWS != 'true'
+        env:
+          MP_ACCESS_TOKEN: ${{ secrets.MP_ACCESS_TOKEN }}
+          MP_WEBHOOK_SECRET: ${{ secrets.MP_WEBHOOK_SECRET }}
+        run: |
+          JWT_SECRET_KEY=$(aws ssm get-parameter --name "/oficina/$ENV/jwt_secret" --with-decryption --query Parameter.Value --output text)
+          echo "::add-mask::$JWT_SECRET_KEY"
+          GATEWAY=$(aws ssm get-parameter --name "/oficina/$ENV/gateway_url" --query Parameter.Value --output text 2>/dev/null || echo "")
+          URL_NOTIFICACAO=${GATEWAY:+$GATEWAY/billing/webhooks/mercadopago}
+          CONTA=$(aws sts get-caller-identity --query Account --output text)
+          IMAGE=$CONTA.dkr.ecr.$AWS_REGION.amazonaws.com/$REPOSITORIO_ECR:$GITHUB_SHA
+          VERSION=$GITHUB_SHA
+          SECRET_HASH=$(printf '%s' "$JWT_SECRET_KEY$MP_ACCESS_TOKEN$MP_WEBHOOK_SECRET" | sha256sum | cut -c1-16)
+          export URL_NOTIFICACAO JWT_SECRET_KEY IMAGE VERSION SECRET_HASH
+          VARIAVEIS='${ENV} ${AWS_REGION} ${IMAGE} ${VERSION} ${SECRET_HASH} ${URL_NOTIFICACAO} ${JWT_SECRET_KEY} ${MP_ACCESS_TOKEN} ${MP_WEBHOOK_SECRET}'
+          for manifesto in namespace serviceaccount configmap secret deployment worker service hpa; do
+            envsubst "$VARIAVEIS" < k8s/$manifesto.yaml | kubectl apply -f -
+          done
+          kubectl rollout status deployment/billing-api -n "$ENV" --timeout=300s
+          kubectl rollout status deployment/billing-worker -n "$ENV" --timeout=300s
+
+      - name: Publica a URL do serviço para o API Gateway
+        id: publica
+        if: env.SKIP_AWS != 'true'
+        run: |
+          for tentativa in $(seq 1 30); do
+            HOST=$(kubectl get service billing-service -n "$ENV" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            [ -n "$HOST" ] && break
+            sleep 10
+          done
+          if [ -z "$HOST" ]; then
+            echo "O LoadBalancer ainda não recebeu um hostname."
+            exit 1
+          fi
+          aws ssm put-parameter --name "/oficina/$ENV/billing_url" --value "http://$HOST" --type String --overwrite
+          echo "url=http://$HOST/billing/apidocs/" >> $GITHUB_OUTPUT
