@@ -2,6 +2,7 @@
 
 Microsserviço de orçamento e pagamento das ordens de serviço da oficina. Gera o orçamento, recebe a aprovação do cliente, cobra pelo Mercado Pago, confirma o pagamento e faz o estorno quando a Saga pede compensação. Faz parte do Tech Challenge Fase 4:
 
+
 | Repositório | Responsabilidade |
 |---|---|
 | [fiap_tech_challenge_oficina_api](https://github.com/gabrielov2003/fiap_tech_challenge_oficina_api) | OS Service, orquestrador da Saga |
