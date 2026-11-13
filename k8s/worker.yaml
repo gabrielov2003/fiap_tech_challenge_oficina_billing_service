@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: billing-worker
+  namespace: ${ENV}
+  labels:
+    app: billing-worker
+    tags.datadoghq.com/env: "${ENV}"
+    tags.datadoghq.com/service: oficina-billing
+    tags.datadoghq.com/version: "${VERSION}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: billing-worker
+  template:
+    metadata:
+      labels:
+        app: billing-worker
+        tags.datadoghq.com/env: "${ENV}"
+        tags.datadoghq.com/service: oficina-billing
+        tags.datadoghq.com/version: "${VERSION}"
+      annotations:
+        checksum/secret: "${SECRET_HASH}"
+        ad.datadoghq.com/billing-worker.logs: '[{"source": "python", "service": "oficina-billing"}]'
+    spec:
+      serviceAccountName: billing
+      containers:
+        - name: billing-worker
+          image: ${IMAGE}
+          command: ["ddtrace-run", "python", "src/worker.py"]
+          envFrom:
+            - configMapRef:
+                name: billing-config
+            - secretRef:
+                name: billing-secret
+          env:
+            - name: DD_AGENT_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: DD_ENV
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['tags.datadoghq.com/env']
+            - name: DD_SERVICE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['tags.datadoghq.com/service']
+            - name: DD_VERSION
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['tags.datadoghq.com/version']
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"

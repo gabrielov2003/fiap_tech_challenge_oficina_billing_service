@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: billing-config
+  namespace: ${ENV}
+data:
+  FLASK_DEBUG: "0"
+  AWS_DEFAULT_REGION: "${AWS_REGION}"
+  TABELA_ORCAMENTOS: "oficina-${ENV}-orcamentos"
+  FILA_COMANDOS: "oficina-${ENV}-billing-comandos.fifo"
+  FILA_EVENTOS_OS: "oficina-${ENV}-os-eventos.fifo"
+  URL_NOTIFICACAO: "${URL_NOTIFICACAO}"
+  DD_LOGS_INJECTION: "true"

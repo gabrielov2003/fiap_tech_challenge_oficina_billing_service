@@ -1,0 +1,16 @@
+.venv
+instance/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.env
+.idea/
+*.egg-info/
+.coverage
+coverage.xml
+htmlcov/
+terraform/
+tests/
+k8s/
+.github/
