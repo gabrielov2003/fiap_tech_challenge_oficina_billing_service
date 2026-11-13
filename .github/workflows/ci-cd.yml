@@ -122,6 +122,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Verifica se a infra está ligada
+        if: env.SKIP_AWS != 'true'
+        run: |
+          if [ "$(aws ssm get-parameter --name /oficina/infra/ligada --query Parameter.Value --output text 2>/dev/null)" != "true" ]; then
+            echo "::warning::Infra desligada, deploy ignorado. Rode o workflow Ligar infra no repositório infra_k8s."
+            echo "SKIP_AWS=true" >> $GITHUB_ENV
+          fi
+
       - uses: hashicorp/setup-terraform@v3
         if: env.SKIP_AWS != 'true'
 
