@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: billing-api
+  namespace: ${ENV}
+  labels:
+    app: billing-api
+    tags.datadoghq.com/env: "${ENV}"
+    tags.datadoghq.com/service: oficina-billing
+    tags.datadoghq.com/version: "${VERSION}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: billing-api
+  template:
+    metadata:
+      labels:
+        app: billing-api
+        tags.datadoghq.com/env: "${ENV}"
+        tags.datadoghq.com/service: oficina-billing
+        tags.datadoghq.com/version: "${VERSION}"
+      annotations:
+        checksum/secret: "${SECRET_HASH}"
+        ad.datadoghq.com/billing-api.logs: '[{"source": "python", "service": "oficina-billing"}]'
+        ad.datadoghq.com/billing-api.checks: |
+          {
+            "http_check": {
+              "init_config": {},
+              "instances": [
+                {
+                  "name": "oficina-billing-${ENV}",
+                  "url": "http://%%host%%:5000/billing/health",
+                  "timeout": 5,
+                  "tags": ["service:oficina-billing", "env:${ENV}"]
+                }
+              ]
+            }
+          }
+    spec:
+      serviceAccountName: billing
+      containers:
+        - name: billing-api
+          image: ${IMAGE}
+          ports:
+            - containerPort: 5000
+          envFrom:
+            - configMapRef:
+                name: billing-config
+            - secretRef:
+                name: billing-secret
+          env:
+            - name: DD_AGENT_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: DD_ENV
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['tags.datadoghq.com/env']
+            - name: DD_SERVICE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['tags.datadoghq.com/service']
+            - name: DD_VERSION
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['tags.datadoghq.com/version']
+          readinessProbe:
+            httpGet:
+              path: /billing/ready
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /billing/health
+              port: 5000
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
